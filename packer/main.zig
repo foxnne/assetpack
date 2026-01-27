@@ -220,7 +220,8 @@ pub fn main() !void {
         // Convert to breadth-first traversal order
         std.mem.sort(Entry, entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
-                return a.depth < b.depth;
+                if (a.depth != b.depth) return a.depth < b.depth;
+                return std.mem.lessThan(u8, a.path, b.path);
             }
         }.less);
 
