@@ -132,7 +132,6 @@ pub fn main() !void {
     }
 
     {
-        // Sort entries by path, with files before directories
         std.mem.sortUnstable(Entry, entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
                 const a_is_dir = std.mem.endsWith(u8, a.path, "/");
