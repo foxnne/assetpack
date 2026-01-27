@@ -132,7 +132,6 @@ pub fn main() !void {
     }
 
     {
-        // Sort entries by path, with files before directories
         std.mem.sortUnstable(Entry, entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
                 const a_is_dir = std.mem.endsWith(u8, a.path, "/");
@@ -220,7 +219,9 @@ pub fn main() !void {
         // Convert to breadth-first traversal order
         std.mem.sort(Entry, entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
-                return a.depth < b.depth;
+                if (a.depth < b.depth) return true;
+                if (a.depth > b.depth) return false;
+                return std.mem.lessThan(u8, a.path, b.path);
             }
         }.less);
 
