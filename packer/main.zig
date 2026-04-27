@@ -1,31 +1,29 @@
 // TODO: allow mapping a command over each file
 
-pub fn main() !void {
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_alloc.deinit();
-    const gpa = debug_alloc.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const cwd = std.Io.Dir.cwd();
 
-    var args = try std.process.argsWithAllocator(gpa);
-    defer args.deinit();
-    _ = args.skip();
-    const input_path = args.next() orelse usage("missing input path");
-    const output_dir_path = args.next() orelse usage("missing input path prefix");
-    const index_file_path = args.next() orelse usage("missing output path");
-    const options_json = args.next() orelse usage("missing options");
-    if (args.skip()) usage("too many arguments");
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
+    defer args_iter.deinit();
+    _ = args_iter.next();
+    const input_path = args_iter.next() orelse usage("missing input path");
+    const output_dir_path = args_iter.next() orelse usage("missing input path prefix");
+    const index_file_path = args_iter.next() orelse usage("missing output path");
+    const options_json = args_iter.next() orelse usage("missing options");
+    if (args_iter.next() != null) usage("too many arguments");
 
     const options_parsed = try std.json.parseFromSlice(Options, gpa, options_json, .{});
     defer options_parsed.deinit();
     const opts = options_parsed.value;
 
-    // Collects a list of all file and directory paths in the input tree.
-    // Directory names end with a trailing slash.
     const Entry = struct {
         path: []const u8,
         children: usize,
         depth: usize,
     };
-    var entries: std.ArrayListUnmanaged(Entry) = .{};
+    var entries: std.ArrayList(Entry) = .empty;
     var entry_arena: std.heap.ArenaAllocator = .init(gpa);
     defer {
         entries.deinit(gpa);
@@ -33,36 +31,34 @@ pub fn main() !void {
     }
 
     {
-        var stack: std.ArrayListUnmanaged(struct {
-            iter: std.fs.Dir.Iterator,
-            out: std.fs.Dir,
+        const Frame = struct {
+            iter: std.Io.Dir.Iterator,
+            out: std.Io.Dir,
             entry: usize,
 
-            pub fn deinit(frame: *@This()) void {
-                frame.iter.dir.close();
-                frame.out.close();
+            pub fn deinit(frame: *@This(), close_io: std.Io) void {
+                frame.iter.reader.dir.close(close_io);
+                frame.out.close(close_io);
             }
-        }) = .empty;
+        };
+        var stack: std.ArrayList(Frame) = .empty;
         defer {
-            for (stack.items) |*frame| {
-                frame.deinit();
-            }
+            for (stack.items) |*frame| frame.deinit(io);
             stack.deinit(gpa);
         }
 
-        // Open input/output dirs
         {
-            var in = std.fs.cwd().openDir(input_path, .{ .iterate = true }) catch |err| {
+            var in = cwd.openDir(io, input_path, .{ .iterate = true }) catch |err| {
                 std.log.err("unable to open input directory '{s}'", .{input_path});
                 return err;
             };
-            errdefer in.close();
+            errdefer in.close(io);
 
-            var out = std.fs.cwd().openDir(output_dir_path, .{}) catch |err| {
+            var out = cwd.openDir(io, output_dir_path, .{}) catch |err| {
                 std.log.err("unable to open output directory '{s}'", .{output_dir_path});
                 return err;
             };
-            errdefer out.close();
+            errdefer out.close(io);
 
             try stack.append(gpa, .{
                 .iter = in.iterateAssumeFirstIteration(),
@@ -72,11 +68,10 @@ pub fn main() !void {
             try entries.append(gpa, .{ .path = "", .depth = 0, .children = 0 });
         }
 
-        // Walk and copy input tree
         while (stack.items.len > 0) {
             const frame = &stack.items[stack.items.len - 1];
-            const entry = try frame.iter.next() orelse {
-                frame.deinit();
+            const entry = try frame.iter.next(io) orelse {
+                frame.deinit(io);
                 stack.items.len -= 1;
                 continue;
             };
@@ -95,11 +90,11 @@ pub fn main() !void {
             });
 
             if (entry.kind == .directory) {
-                var in = try frame.iter.dir.openDir(entry.name, .{ .iterate = true });
-                errdefer in.close();
+                var in = try frame.iter.reader.dir.openDir(io, entry.name, .{ .iterate = true });
+                errdefer in.close(io);
 
-                var out = try frame.out.makeOpenPath(entry.name, .{});
-                errdefer out.close();
+                var out = try frame.out.createDirPathOpen(io, entry.name, .{});
+                errdefer out.close(io);
 
                 try stack.append(gpa, .{
                     .iter = in.iterateAssumeFirstIteration(),
@@ -107,21 +102,14 @@ pub fn main() !void {
                     .entry = entries.items.len - 1,
                 });
             } else {
-                try frame.iter.dir.copyFile(entry.name, frame.out, entry.name, .{});
+                try frame.iter.reader.dir.copyFile(entry.name, frame.out, entry.name, io, .{});
             }
         }
     }
 
-    // Generate index file
-    var source_data = if (writergate)
-        std.Io.Writer.Allocating.init(gpa)
-    else
-        std.ArrayList(u8).init(gpa);
+    var source_data: std.Io.Writer.Allocating = .init(gpa);
     defer source_data.deinit();
-    var source = if (writergate)
-        &source_data.writer
-    else
-        source_data.writer();
+    const source = &source_data.writer;
 
     try source.writeAll("// This file was autogenerated by assetpack\n");
 
@@ -144,15 +132,14 @@ pub fn main() !void {
             }
         }.less);
 
-        // Compute relative path
-        const path_prefix = try std.fs.path.relative(
+        const path_prefix = try std.fs.path.relativePosix(
             gpa,
+            ".",
             std.fs.path.dirname(index_file_path) orelse ".",
             output_dir_path,
         );
         defer gpa.free(path_prefix);
 
-        // Ensure we don't escape the module root
         if (std.mem.startsWith(u8, path_prefix, "../")) {
             std.log.err("output directory not a subdirectory of output module root", .{});
             return error.InvalidOutputDirectory;
@@ -160,11 +147,9 @@ pub fn main() !void {
         std.debug.assert(std.mem.indexOf(u8, path_prefix, "/../") == null);
 
         var prev_path: []const u8 = "";
-        std.debug.assert(entries.items[0].path.len == 0); // root is always first
+        std.debug.assert(entries.items[0].path.len == 0);
         for (entries.items[1..]) |entry| {
-            if (std.mem.endsWith(u8, entry.path, "/")) {
-                break; // dirs come after files, so we're done
-            }
+            if (std.mem.endsWith(u8, entry.path, "/")) break;
 
             const byte_diff = std.mem.indexOfDiff(u8, entry.path, prev_path).?;
             const diff = if (entry.path[byte_diff] == '/')
@@ -174,12 +159,10 @@ pub fn main() !void {
             else
                 0;
 
-            // Close old dir namespaces
             for (0..std.mem.count(u8, prev_path[diff..], "/")) |_| {
                 try source.writeAll("};");
             }
 
-            // Open new dir namespaces
             var pos = diff;
             while (std.mem.indexOfScalarPos(u8, entry.path, pos, '/')) |sep| : (pos = sep + 1) {
                 try source.print(fmt.pub_const ++ " = struct {{", .{
@@ -187,7 +170,6 @@ pub fn main() !void {
                 });
             }
 
-            // Write file
             try source.print(fmt.pub_const ++ " = " ++ fmt.embedfile, .{
                 std.zig.fmtId(entry.path[pos..]),
                 fmt.zigString(path_prefix),
@@ -197,18 +179,15 @@ pub fn main() !void {
             prev_path = entry.path;
         }
 
-        // Close remaining dir namespaces
         for (0..std.mem.count(u8, prev_path, "/")) |_| {
             try source.writeAll("};");
         }
     }
 
-    // Close asset namespace
     if (opts.asset_namespace != null) {
         try source.writeAll("};");
     }
 
-    // Write additional namespaces
     const asset_namespace = if (opts.asset_namespace) |ns|
         try std.fmt.allocPrint(gpa, fmt.f, .{std.zig.fmtId(ns)})
     else
@@ -216,7 +195,6 @@ pub fn main() !void {
     defer gpa.free(asset_namespace);
 
     if (opts.root_dir_decl) |ns| {
-        // Convert to breadth-first traversal order
         std.mem.sort(Entry, entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
                 if (a.depth != b.depth) return a.depth < b.depth;
@@ -224,7 +202,7 @@ pub fn main() !void {
             }
         }.less);
 
-        std.debug.assert(entries.items[0].path.len == 0); // root
+        std.debug.assert(entries.items[0].path.len == 0);
         try source.print(
             fmt.pub_const ++
                 \\: @import("assetpack").Dir = .{{
@@ -235,7 +213,6 @@ pub fn main() !void {
             .{ std.zig.fmtId(ns), entries.items[0].children },
         );
 
-        // Write path map
         var start: usize = entries.items[0].children;
         for (entries.items[1..]) |entry| {
             const name = std.fs.path.basenamePosix(entry.path);
@@ -269,14 +246,13 @@ pub fn main() !void {
         );
     }
 
-    // Write index file
     const source_slice = try source_data.toOwnedSliceSentinel(0);
     defer gpa.free(source_slice);
     var ast: std.zig.Ast = try .parse(gpa, source_slice, .zig);
     defer ast.deinit(gpa);
 
     if (ast.errors.len > 0) {
-        try std.zig.printAstErrorsToStderr(gpa, ast, "<generated>", .auto);
+        try std.zig.printAstErrorsToStderr(gpa, io, ast, "<generated>", .auto);
         var lines = std.mem.splitScalar(u8, source_slice, '\n');
         var line_num: usize = 1;
         while (lines.next()) |line| : (line_num += 1) {
@@ -286,20 +262,12 @@ pub fn main() !void {
         std.process.fatal("Generated invalid code. This is a bug in assetpack.", .{});
     }
 
-    if (writergate) {
-        var out_file = try std.fs.cwd().createFile(index_file_path, .{});
-        var out_buf: [4096]u8 = undefined;
-        var out = out_file.writer(&out_buf);
-        try ast.render(gpa, &out.interface, .{});
-        try out.interface.flush();
-    } else {
-        const rendered = try ast.render(gpa);
-        defer gpa.free(rendered);
-        try std.fs.cwd().writeFile(.{
-            .sub_path = index_file_path,
-            .data = rendered,
-        });
-    }
+    var out_file = try cwd.createFile(io, index_file_path, .{});
+    defer out_file.close(io);
+    var out_buf: [4096]u8 = undefined;
+    var out = out_file.writer(io, &out_buf);
+    try ast.render(gpa, &out.interface, .{});
+    try out.interface.flush();
 }
 
 fn usage(err_msg: []const u8) noreturn {
@@ -308,18 +276,11 @@ fn usage(err_msg: []const u8) noreturn {
     std.process.exit(1);
 }
 
-// Compatibility across writergate
-const writergate = @TypeOf(std.io.Writer) == type;
-
 const fmt = struct {
-    const f = if (writergate) "{f}" else "{}";
+    const f = "{f}";
     const pub_const = "\npub const " ++ f;
     const embedfile = "@embedFile(\"" ++ f ++ "/" ++ f ++ "\");";
-
-    const zigString = if (writergate)
-        std.zig.fmtString
-    else
-        std.zig.fmtEscapes;
+    const zigString = std.zig.fmtString;
 };
 
 const std = @import("std");
