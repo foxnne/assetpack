@@ -132,13 +132,21 @@ pub fn main(init: std.process.Init) !void {
             }
         }.less);
 
-        const path_prefix = try std.fs.path.relativePosix(
+        const module_root = std.fs.path.dirname(index_file_path) orelse ".";
+        const path_prefix = try std.fs.path.relative(
             gpa,
             ".",
-            std.fs.path.dirname(index_file_path) orelse ".",
+            init.environ_map,
+            module_root,
             output_dir_path,
         );
         defer gpa.free(path_prefix);
+
+        if (builtin.os.tag == .windows) {
+            for (path_prefix) |*byte| {
+                if (byte.* == '\\') byte.* = '/';
+            }
+        }
 
         if (std.mem.startsWith(u8, path_prefix, "../")) {
             std.log.err("output directory not a subdirectory of output module root", .{});
@@ -284,4 +292,5 @@ const fmt = struct {
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Options = @import("Options.zig");
