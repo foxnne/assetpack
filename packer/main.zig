@@ -1,5 +1,14 @@
 // TODO: allow mapping a command over each file
 
+/// `relativePosix` only understands `/` separators; Zig passes Windows paths with `\`.
+fn dupePosixPathSegments(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const dup = try allocator.dupe(u8, path);
+    if (std.fs.path.sep != '/') {
+        _ = std.mem.replace(u8, dup, "\\", "/");
+    }
+    return dup;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -132,11 +141,17 @@ pub fn main(init: std.process.Init) !void {
             }
         }.less);
 
+        const index_dir = std.fs.path.dirname(index_file_path) orelse ".";
+        const index_dir_posix = try dupePosixPathSegments(gpa, index_dir);
+        defer gpa.free(index_dir_posix);
+        const output_dir_posix = try dupePosixPathSegments(gpa, output_dir_path);
+        defer gpa.free(output_dir_posix);
+
         const path_prefix = try std.fs.path.relativePosix(
             gpa,
             ".",
-            std.fs.path.dirname(index_file_path) orelse ".",
-            output_dir_path,
+            index_dir_posix,
+            output_dir_posix,
         );
         defer gpa.free(path_prefix);
 
