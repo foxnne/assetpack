@@ -4,7 +4,7 @@
 fn dupePosixPathSegments(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const dup = try allocator.dupe(u8, path);
     if (std.fs.path.sep != '/') {
-        _ = std.mem.replace(u8, dup, "\\", "/");
+        _ = std.mem.replace(u8, dup, "\\", "/", dup);
     }
     return dup;
 }
