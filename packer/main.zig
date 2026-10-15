@@ -263,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
 
     const source_slice = try source_data.toOwnedSliceSentinel(0);
     defer gpa.free(source_slice);
-    var ast: std.zig.Ast = try .parse(gpa, source_slice, .zig);
+    var ast: std.zig.Ast = try .parse(gpa, source_slice, .{ .mode = .zig });
     defer ast.deinit(gpa);
 
     if (ast.errors.len > 0) {
