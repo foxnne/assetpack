@@ -75,7 +75,7 @@ pub const Dir = struct {
 };
 
 inline fn isComptimeKnown(value: anytype) bool {
-    return @typeInfo(@TypeOf(.{value})).@"struct".fields[0].is_comptime;
+    return @typeInfo(@TypeOf(.{value})).@"struct".field_attrs[0].@"comptime";
 }
 inline fn comptimeOrNull(value: anytype) ?@TypeOf(value) {
     return if (isComptimeKnown(value)) value else null;
